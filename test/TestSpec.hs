@@ -7,6 +7,7 @@ import qualified Control.Concurrent               as C
 import           Control.Concurrent.MVar
 import           Control.Exception                (bracket)
 import           Control.Lens              hiding (Context)
+import           Control.Natural
 import           Data.Aeson
 import           Data.Aeson.Lens
 import qualified Data.HashMap.Strict              as HM
@@ -25,9 +26,11 @@ import           Test.Hspec
 import           Test.Hspec.Wai
 import           Test.Hspec.Wai.Matcher
 
+
 import WebApp
 
-testApp = serve api server
+testApp = serve api (hoistServer api (unwrapNT (echoHandlerToHandler FreeMonad)) echoHandler)
+  --serve api echo
 
 withUserApp :: (Warp.Port -> IO ()) -> IO ()
 withUserApp action =
@@ -40,7 +43,7 @@ spec =
   -- `around` will start our Server before the tests and turn it off after
   around withUserApp $ do
     -- create a test client function    
-    let echo' :<|> sayHello' :<|> serveArea :<|> shapes = client api
+    let echo'  = client api
     -- create a servant-client ClientEnv
     baseUrl <- runIO $ parseBaseUrl "http://localhost"
     manager <- runIO $ newManager defaultManagerSettings
@@ -48,26 +51,8 @@ spec =
 
     -- testing scenarios start here
     describe "API tests" $ do
-      it "should calculate square area" $ \port -> do
-        result <- runClientM (serveArea (Square 5)) (clientEnv port)
-        result `shouldBe` (Right $ 25.0)
-
-      it "will it fail ?" $ \port -> do
-        result <- runClientM (serveArea (Square 5)) (clientEnv port)
-        result `shouldBe` (Right $ 16.0)
 
       it "echo test" $ \port -> do
-        result <- runClientM (echo' "Hello") (clientEnv port)
-        result `shouldBe` (Right (Message "Hello"))
-
-      it "sayHello with name test" $ \port -> do
-        result <- runClientM (sayHello' (Just "Gendalf")) (clientEnv port)
-        result `shouldBe` (Right "Hello, Gendalf!")
-
-      it "sayHello without name test" $ \port -> do
-        result <- runClientM (sayHello' Nothing) (clientEnv port)
-        result `shouldBe` (Right "Hello, stranger!")
-
-      it "shapes" $ \port -> do
-        result <- runClientM (shapes) (clientEnv port)
-        result `shouldBe` (Right [Circle 5.0,Square 25.0])
+        let mesage = "Hello!"
+        result <- runClientM (echo' mesage) (clientEnv port)
+        result `shouldBe` (Right mesage)

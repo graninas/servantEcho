@@ -31,7 +31,7 @@ license:             BSD-3-Clause
 license-file:        LICENSE
 
 -- The package author(s).
-author:              Vasily Gorev
+author:              Vasily Gorev, Sergei Stepanenko, Alexander Granin
 
 -- An email address to which users can send suggestions, bug reports, and
 -- patches.
@@ -69,10 +69,13 @@ library se-lib
                      , extra
                      , filepath
                      , free
+                     , freer
+                     , lens
                      , lens-aeson
                      , logging
                      , microlens
                      , mtl
+                     , natural-transformation
                      , network
                      , newtype-generics
                      , process
@@ -80,8 +83,11 @@ library se-lib
                      , safe-exceptions
                      , servant
                      , servant-client
-                     , servant-server
+                     , servant-docs
+                     , servant-server >= 0.16.0
+                     , servant-swagger
                      , stm
+                     , swagger2
                      , text
                      , time
                      , transformers
@@ -157,11 +163,12 @@ test-suite test
                      , transformers-either
                      , aeson
                      , text
-                     , servant-server
+                     , servant-server>= 0.16.0
                      , servant
                      , servant-client
                      , warp
                      , free
+                     , freer
                      , logging
                      , wai
                      , base-compat
@@ -171,6 +178,11 @@ test-suite test
                      , http-client
                      , http-types
                      , hspec-wai
+                     , servant-swagger
+                     , swagger2
+                     , servant-docs
+                     , natural-transformation
+                     , mtl
 
   default-extensions: GADTs
                       RankNTypes
@@ -205,3 +217,5 @@ benchmark simpleBench
   build-depends:      se-lib
                     , base
                     , gauge
+                    , process
+                    , servant-server >= 0.16.0

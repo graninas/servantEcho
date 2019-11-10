@@ -3,118 +3,151 @@ module WebApp
 
 
 import Control.Applicative
+import Control.Lens
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Either
 import Data.Aeson
 import Data.Monoid
 import Data.Proxy
+import Data.Swagger
 import Data.Text (Text)
+import Data.Typeable (Typeable)
 import GHC.Generics
 import Servant
 import Servant.API
 import Servant.Client
+
+import Servant.Docs (ToSample, ToCapture, DocIntro(..), DocCapture(..), markdown, singleSample, docs)
 import Servant.Server
+import Servant.Swagger
 import Network.Wai.Handler.Warp
 import Control.Monad.Free
+import Control.Monad.Freer.Internal hiding (run)
+import Control.Monad.Reader
+import Control.Monad.Except
+import Control.Natural
 
+import qualified Control.Monad.Freer as F
+import qualified Control.Monad.Free.Church as CE
 import qualified Control.Logging as L
 import qualified Data.Text    as T
 import qualified Data.Text.IO as T
+import qualified Servant.Docs as SD
 
--- import Universum
+data BackendType = FreeMonad | ChurchEncodedFreeMonad | FreerMonad
+  deriving (Eq, Show)
 
-type API = "echo" :> Capture "message" Text :> Get '[JSON] Message
-      :<|> "sayHello"  :> QueryParam "name" Text :> Get '[JSON] Text
-      :<|> AreaAPI
+parseBackendType :: String -> Maybe BackendType
+parseBackendType str = case str of
+  "FM" -> Just FreeMonad
+  "CEFM" -> Just ChurchEncodedFreeMonad
+  "FR" -> Just FreerMonad
+  _ -> Nothing
 
-type AreaAPI = "area" :>
-  (    ReqBody '[JSON] Shape :> Post '[JSON] Double
-  :<|> "shapes" :> Get '[JSON] [Shape]
-  )
+type EchoHandler = ReaderT BackendType (ExceptT ServerError IO)
 
-newtype Message = Message { msg :: Text }
-  deriving (Generic, Show, Eq)
+echoHandlerToHandler :: BackendType -> EchoHandler :~> Handler
+echoHandlerToHandler env = NT echoHandlerToHandler'
+  where
+  echoHandlerToHandler' :: EchoHandler a -> Handler a
+  echoHandlerToHandler' h = Handler $ runReaderT h env
 
-instance ToJSON Message
-instance FromJSON Message
+type API = "echo" :> Capture "message" Text :> Get '[JSON] Text
 
-data LoggerF next where
-  LogMessage :: Text -> (() -> next) -> LoggerF next
-  deriving (Functor)
-
-type LoggerL = Free LoggerF
-
-class Logger m where
-  logMsg :: Text -> m ()
-
-instance Logger LoggerL where
-  logMsg msg = liftF $ LogMessage msg id
-
-interpretLoggerF :: LoggerF a -> IO a
-interpretLoggerF (LogMessage msg next) = do
-    L.withStdoutLogging $ L.log msg
-    pure $ next ()
-
-runLoggerL :: LoggerL () -> IO ()
-runLoggerL = foldFree interpretLoggerF
-
-data Shape = Circle Double | Square Double
-  deriving (Generic, Show, Eq)
-
-instance ToJSON Shape
-instance FromJSON Shape
-
-shapeServer :: Server AreaAPI
-shapeServer = serveArea :<|> shapes
-
-area :: Shape -> Double
-area (Circle r) = pi * r * r
-area (Square s) = s * s
-
-serveArea :: Shape -> Handler Double
-serveArea = pure.area
-
-shapes :: Handler [Shape]
-shapes = pure [Circle 5, Square 25]
-
-data EchoF next
-  = SayHello Text next
-  | Echo Text next
-  deriving (Functor)
-
-type EchoL = Free EchoF
+type APIWithDocs = ServantDocsAPI :<|> SwaggerAPI :<|> API
 
 class Echo m where
-    sayHello :: Maybe Text -> m Text
     echo :: Text -> m Text
 
+data EchoF next
+  = Echo Text next
+  deriving (Functor)
+
+-- Free monad
+type EchoL = Free EchoF
+
 instance Echo EchoL where
-    sayHello (Just name) = liftF $ SayHello name name
-    sayHello Nothing = liftF $ SayHello "stranger" "stranger"
     echo msg = liftF $ Echo msg msg
 
-runEchoL :: EchoL Text -> Handler Text
-runEchoL eff = case eff of
+runEchoLFM :: EchoL Text -> Handler Text
+runEchoLFM eff = case eff of
   Pure r -> pure r
-  Free (SayHello name next) -> do
-    let str = "Hello, " <> name <> "!"
-    liftIO $ runLoggerL $ logMsg str
-    pure str
-  Free (Echo msg next) -> do
-    liftIO $ runLoggerL $ logMsg msg
-    pure msg
+  Free (Echo msg next) -> pure msg
 
-echo' :: Text -> Handler Message
-echo' msg = Message <$> runEchoL (echo msg)
+-- Church-encoded free monad
+type EchoLCE = CE.F EchoF
 
-sayHello' :: Maybe Text -> Handler Text
-sayHello' name = runEchoL $ sayHello name
+instance Echo EchoLCE where
+  echo msg = CE.liftF $ Echo msg msg
+
+matchF :: Functor f => (a -> r) -> (f r -> r) -> CE.F f a -> r
+matchF kp kf f = CE.runF f kp kf
+
+runEchoLCEFM :: EchoLCE Text -> Handler Text
+runEchoLCEFM = matchF pure (\(Echo msg _) -> pure msg)
+
+-- Freer
+data EchoFreerL a where
+  EchoFreer :: Text -> EchoFreerL Text
+
+echoFreer :: F.Member EchoFreerL effs => Text -> F.Eff effs Text
+echoFreer msg = F.send (EchoFreer msg)
+
+instance Echo (Eff '[EchoFreerL]) where
+  -- echo :: Text -> Eff '[EchoFreerL] Text
+  echo = pure
+
+runEchoFreer :: F.Eff '[EchoFreerL] Text -> Handler Text
+runEchoFreer (Val x) = pure x
+runEchoFreer (E u q) = case extract u of
+  (EchoFreer msg) -> pure msg >>= \s -> runEchoFreer (qApp q s)
+
+echoHandler :: Text -> EchoHandler Text
+echoHandler msg = do
+  b <- ask
+  case b of
+    FreeMonad -> lift $ runHandler' $ runEchoLFM (echo msg)
+    ChurchEncodedFreeMonad -> lift $ runHandler' $ runEchoLCEFM (echo msg)
+    FreerMonad -> lift $ runHandler' $ runEchoFreer (echo msg)
 
 api :: Proxy API
 api = Proxy
 
-server :: Server API
-server = echo' :<|> sayHello' :<|> shapeServer
+apiWithDocs :: Proxy APIWithDocs
+apiWithDocs = Proxy
 
-runApp = run 8080 (serve api server)
+server :: BackendType -> Server APIWithDocs
+server env = pure servantDocsAPI :<|> pure swaggerAPI :<|> hoistServer api (unwrapNT (echoHandlerToHandler env)) echoHandler
+
+runApp env = run 8080 (serve apiWithDocs (server env))
+
+
+-- Swagger part
+
+-- | API for serving @swagger.json@.
+type SwaggerAPI = "swagger.json" :> Get '[JSON] Swagger
+
+-- | Swagger spec for API.
+swaggerAPI :: Swagger
+swaggerAPI = toSwagger api
+  & info.title   .~ "Example API"
+  & info.version .~ "1.0"
+  & info.description ?~ "This is an API that tests swagger integration"
+
+-- Servant-docs part
+
+type ServantDocsAPI = "servant-docs.md" :> Get '[PlainText] String
+
+servantDocsAPI :: String
+servantDocsAPI = echoDocs
+
+instance ToCapture (Capture "message" Text) where
+  toCapture _ = DocCapture "message" "message to echo"
+
+instance ToSample Text where
+  toSamples _ = singleSample "Text sample"
+
+
+
+echoDocs = markdown (docs api :: SD.API)
